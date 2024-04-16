@@ -1,0 +1,12 @@
+[package]
+name = "fatline-server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+axum = { version = "0.7.4", features = ["default"] }
+diesel = { version = "2.1.5", features = ["default", "sqlite"] }
+fatline-rs = { git = "https://github.com/0x330a-public/fatline-rs.git", rev = "270edcaff6c4a2bb0f8bfc1b7b82570308abe6ef" }
+async-nats = "0.34.0"
