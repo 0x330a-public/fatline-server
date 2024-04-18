@@ -1,4 +1,7 @@
+use std::any::Any;
+use std::ops::DerefMut;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use axum::{
     extract::Request,
     response::Response
@@ -12,9 +15,13 @@ use tower::{Layer, Service as TowerService};
 use crate::service::Service;
 use crate::{FID_HEADER, PUB_HEX_HEADER, SIGNATURE_DATA_HEADER, SIGNATURE_HEADER};
 
-async fn fid_sig_auth_middleware(
+fn bad_request(_: impl Any) -> StatusCode {
+    StatusCode::BAD_REQUEST
+}
+
+pub async fn fid_sig_auth_middleware(
     headers: HeaderMap,
-    State(state): State<Service>,
+    State(state): State<Arc<Mutex<Service>>>,
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
@@ -30,15 +37,25 @@ async fn fid_sig_auth_middleware(
     let mut msg = [0u8;HASH_LENGTH];
     let mut sig = [0u8; SIGNATURE_LENGTH];
     let mut pub_key = [0u8; PUBLIC_KEY_LENGTH];
-    let fid: u64 = u64::from_str(fid_header.clone()).map_err(|_|StatusCode::BAD_REQUEST)?;
-    match validate_fid_and_key();
 
+    hex::decode_to_slice(msg_header.as_bytes(), &mut msg).map_err(bad_request)?;
+    hex::decode_to_slice(sig_header, &mut sig).map_err(bad_request)?;
+    hex::decode_to_slice(pub_key_header.as_bytes(), &mut pub_key).map_err(bad_request)?;
 
-    let response = next.run(request).await;
+    let fid: u64 = u64::from_str(fid_header.to_str().map_err(bad_request)?).map_err(bad_request)?;
 
-    // do something with `response`...
+    let mut service_lock = state.lock().map_err(|_|StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(response)
+    match validate_fid_and_key(
+        &mut service_lock.hub_client,
+        msg,
+        sig,
+        pub_key,
+        fid
+    ).await {
+        Ok(_) => Ok(next.run(request).await),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR)
+    }
 }
 
 // Validate that pub_key signed the hash and that pub_key belongs to, and is active on fid
@@ -68,6 +85,11 @@ async fn validate_fid_and_key(
     }
     // check fid actually has key
 
+    if user_service.key_valid_for_fid(&pub_key, fid).await
+        .map_err(|e|StatusCode::INTERNAL_SERVER_ERROR)? {
+        Ok(())
+    } else {
+        Err(StatusCode::BAD_REQUEST)
+    }
 
-    todo!()
 }

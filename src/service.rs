@@ -1,7 +1,7 @@
 use fatline_rs::HubService;
 
 pub struct Service {
-    hub_client: HubService
+    pub(crate) hub_client: HubService
 }
 
 impl Service {
