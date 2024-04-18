@@ -10,7 +10,8 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7.4" }
 tower = "0.4.13"
 diesel = { version = "2.1.5", features = ["default", "sqlite"] }
-fatline-rs = { git = "https://github.com/0x330a-public/fatline-rs.git", rev = "1f4522af75f8a629834df566670c82bf8588cbad", features = ["service_types"] }
+blake3 = "1.5.1"
+fatline-rs = { git = "https://github.com/0x330a-public/fatline-rs.git", rev = "5c0b32453d7fcd8ad4ecd13d18b955df92103194", features = ["service_types"] }
 dotenv = "0.15.0"
 eyre = "0.6.12"
 futures-util = "0.3.30"
