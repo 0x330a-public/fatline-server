@@ -482,6 +482,7 @@ dependencies = [
  "fatline-rs",
  "futures-util",
  "hex",
+ "serde",
  "tokio",
  "tower",
 ]

@@ -16,3 +16,4 @@ dotenv = "0.15.0"
 eyre = "0.6.12"
 futures-util = "0.3.30"
 hex = "0.4.3"
+serde = { version = "1.0.197", features = ["derive"] }
