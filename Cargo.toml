@@ -6,14 +6,31 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+
+dotenvy_macro = "0.15.0"
+dotenvy = "0.15.0"
+
 tokio = { version = "1", features = ["full"] }
+
 axum = { version = "0.7.4" }
 tower = "0.4.13"
-diesel = { version = "2.1.5", features = ["default", "sqlite"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 blake3 = "1.5.1"
-fatline-rs = { git = "https://github.com/0x330a-public/fatline-rs.git", rev = "5c0b32453d7fcd8ad4ecd13d18b955df92103194", features = ["service_types"] }
-dotenv = "0.15.0"
 eyre = "0.6.12"
 futures-util = "0.3.30"
 hex = "0.4.3"
 serde = { version = "1.0.197", features = ["derive"] }
+ciborium = "0.2.2"
+diesel = { version = "2.2.1", features = ["r2d2", "postgres"] }
+r2d2_postgres = "0.18.1"
+thiserror = "1.0.61"
+tokio-stream = "0.1.15"
+crossbeam = "0.8"
+dashmap = { version = "6", features = ["inline"] }
+
+[dependencies.fatline-rs]
+git = "https://github.com/0x330a-public/fatline-rs.git"
+rev = "802017108dffae1dec49a64811d67dcab873744d"
+features = ["service_types", "subscription"]
