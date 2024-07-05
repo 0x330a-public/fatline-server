@@ -15,8 +15,8 @@ CREATE TABLE IF NOT EXISTS signers (
 );
 
 CREATE TABLE IF NOT EXISTS links (
-    fid bigint,
-    target bigint,
-    timestamp timestamp,
+    fid bigint REFERENCES users(fid) ON DELETE CASCADE NOT NULL,
+    target bigint REFERENCES users(fid) ON DELETE CASCADE NOT NULL,
+    timestamp timestamp NOT NULL,
     primary key (fid, target)
 );

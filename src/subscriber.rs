@@ -2,8 +2,9 @@ use std::any::Any;
 use std::sync::Arc;
 use crossbeam::channel::Sender;
 use fatline_rs::HubService;
-use fatline_rs::proto::{HubEvent, HubEventType, MessageType, on_chain_event, OnChainEventType, SignerEventType, SubscribeRequest};
+use fatline_rs::proto::{HubEvent, HubEventType, Message, MessageData, MessageType, on_chain_event, OnChainEvent, OnChainEventType, SignerEventType, SubscribeRequest};
 use fatline_rs::proto::hub_event::Body;
+use fatline_rs::proto::message_data::Body as MBody;
 use futures_util::StreamExt;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, trace};
@@ -13,6 +14,45 @@ use crate::worker::Task;
 
 pub struct Subscriber {
     handle: JoinHandle<()>,
+}
+
+pub(crate) fn signer_from_event(event: &OnChainEvent) -> Option<Signer> {
+    if event.r#type() == OnChainEventType::EventTypeSigner {
+        if let Some(on_chain_event::Body::SignerEventBody(signer_body)) = &event.body {
+            Some(Signer {
+                pk: signer_body.key.clone(),
+                fid: event.fid as i64,
+                active: signer_body.event_type() == SignerEventType::Add
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+fn handle_merge_message(message: Message, sender: &Sender<Task>) {
+
+    let data = message.data.unwrap_or_default();
+
+    if let Some(body) = data.body {
+        match body {
+            MBody::CastAddBody(_) => {}
+            MBody::CastRemoveBody(_) => {}
+            MBody::ReactionBody(_) => {}
+            MBody::VerificationAddAddressBody(_) => {}
+            MBody::VerificationRemoveBody(_) => {}
+            MBody::UserDataBody(_user_data) => {
+                // process actual user_data and insert into DB here instead of queuing the index task
+                let _ = sender.send(Task::IndexFid(data.fid, true));
+            }
+            MBody::LinkBody(_) => {}
+            MBody::UsernameProofBody(_) => {}
+            MBody::FrameActionBody(_) => {}
+            MBody::LinkCompactStateBody(_) => {}
+        }
+    }
 }
 
 async fn subscribe(mut hub_client: HubService, sender: Sender<Task>) {
@@ -26,7 +66,11 @@ async fn subscribe(mut hub_client: HubService, sender: Sender<Task>) {
         match &message.r#type() {
             HubEventType::None => {}
             HubEventType::MergeMessage => {
-
+                if let Some(Body::MergeMessageBody(body)) = message.body {
+                    if let Some(message) = body.message {
+                        handle_merge_message(message, &sender);
+                    }
+                }
             }
             HubEventType::PruneMessage => {
                 // handle updated prunes
@@ -38,37 +82,12 @@ async fn subscribe(mut hub_client: HubService, sender: Sender<Task>) {
                 // probably don't bother with this
             }
             HubEventType::MergeOnChainEvent => {
-                match message.body {
-                    Some(Body::MergeOnChainEventBody(body)) => {
-                        body.on_chain_event.map(|event| {
-                            if event.r#type() == OnChainEventType::EventTypeSigner {
-                                // task add signer here
-                                match event.body {
-                                    Some(on_chain_event::Body::SignerEventBody(signer_body)) => {
-                                        trace!("Handling signer event {:?}", &signer_body);
-                                        let signer = Signer {
-                                            pk: signer_body.key.clone(),
-                                            fid: event.fid as i64,
-                                            active: signer_body.event_type() == SignerEventType::Add
-                                        };
-                                        match sender.send(Task::UpdateSigner(signer)) {
-                                            Err(e) => {
-                                                error!("Error scheduling signer update for task {e:?}");
-                                            },
-                                            _ => {
-                                                // sent update signer request successfully, expected path
-                                            }
-                                        };
-                                    }
-                                    _ => {} // disregard body that isn't a signer event body on signer event type
-                                };
-                            } else {
-                                // on chain event was a different type than event type signer
-                                trace!("Not handling event of type: {}", event.r#type().as_str_name());
-                            }
-                        });
-                    },
-                    _ => {}
+                if let Some(Body::MergeOnChainEventBody(body)) = message.body {
+                    body.on_chain_event.map(|event| {
+                        if let Some(signer) = signer_from_event(&event) {
+                            let _ = sender.send(Task::UpdateSigner(signer));
+                        }
+                    });
                 };
             }
         }

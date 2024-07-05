@@ -1,25 +1,33 @@
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use axum::{Extension, Json, middleware::from_fn_with_state, Router, routing::get};
-use axum::extract::State;
+use axum::{Error, Extension, Json, middleware::from_fn_with_state, Router, routing::get};
+use axum::body::{Body, Bytes};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use axum::routing::post;
+use clap::{Parser, Subcommand};
 use crossbeam::channel;
+use crossbeam::channel::{bounded, Sender};
 use dashmap::DashMap;
 use dotenvy::var;
-use eyre::Result;
-use fatline_rs::{posts::PostService, users::UserService};
+use eyre::{bail, Result};
+use fatline_rs::{HubService, MessageTrait, posts::PostService, users::UserService};
+use fatline_rs::proto::{FidRequest, Message};
 use fatline_rs::users::Profile;
+use futures_util::TryFutureExt;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use serde::Serialize;
-use tracing::debug;
+use tracing::{debug, error};
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use crate::{auth_layer::fid_sig_auth_middleware, service::ServiceState};
-use crate::subscriber::Subscriber;
-use crate::user_repo::UserRepository;
+use crate::signer_repo::SignerRepository;
+use crate::subscriber::{signer_from_event, Subscriber};
+use crate::user_models::{Link, Signer};
+use crate::user_repo::{FollowDirection, UserRepository};
 use crate::worker::{Task, Worker};
 
 mod schema;
@@ -45,9 +53,49 @@ const FID_HEADER: &'static str = "fid";
 
 type ServiceArcState = State<Arc<Mutex<ServiceState>>>;
 
+#[derive(Parser, Debug)]
+#[command(name="fatline")]
+#[command(about="Fatline server binary")]
+struct Args {
+    #[command(subcommand)]
+    command: Commands
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Sync the signers for fid and return
+    #[command(name = "sync", arg_required_else_help = true)]
+    SyncSigner {
+        #[arg(required = true)]
+        fid: u64
+    },
+    /// Run the server normally
+    #[command(name= "run")]
+    Run{}
+}
+
+async fn index_signers(fid: u64) -> Result<()> {
+    let (s,r) = bounded(1);
+    let mut state = ServiceState::new(s).await;
+
+    let events = state.hub_client.get_on_chain_signers_by_fid(FidRequest {
+        fid,
+        page_size: None,
+        reverse: None,
+        page_token: None
+    }).await?.into_inner().events.iter().filter_map(|e| signer_from_event(e)).collect::<Vec<_>>();
+
+    debug!("inserting {} signer events", events.len());
+
+    for signer in events {
+        state.insert_signer(signer).await?;
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let bind_addr = var("BIND_ADDR").unwrap_or("127.0.0.1:8000".to_string());
 
     tracing_subscriber::registry()
         .with(
@@ -59,6 +107,15 @@ async fn main() -> Result<()> {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
+
+    let args = Args::parse();
+
+    if let Commands::SyncSigner{ fid } = args.command {
+        index_signers(fid).await?;
+        return Ok(())
+    };
+
+    let bind_addr = var("BIND_ADDR").unwrap_or("127.0.0.1:8000".to_string());
 
     debug!("Initializing resources");
 
@@ -79,6 +136,11 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/profile/me", get(current_user_profile))
+        .route("/profile/:fid", get(get_user_profile))
+        .route("/profile/:fid/follows", get(get_user_followed_by))
+        .route("/profile/:fid/following", get(get_user_following))
+        .route("/submit_message", post(submit_message))
+        .route("/submit_messages", post(submit_messages))
         .route_layer(from_fn_with_state(service_arc.clone(), fid_sig_auth_middleware))
         .with_state(service_arc);
 
@@ -92,8 +154,133 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn queue_index_fid(sender: &Sender<Task>, fid: u64) {
+    if let Err(e) = sender.send(Task::IndexFid(fid, false)) {
+        error!("Couldn't queue fid index task {e}");
+    }
+}
+
+fn queue_index_links(sender: &Sender<Task>, fid: u64) {
+    if let Err(e) = sender.send(Task::IndexLinks(fid)) {
+        error!("Couldn't queue fid link index task {e}");
+    }
+}
+
+fn queue_index_casts(sender: &Sender<Task>, fid: u64) {
+    if let Err(e) = sender.send(Task::IndexFidCasts(fid, false)) {
+        error!("Couldn't queue fid cast index task {e}");
+    }
+}
+
+async fn handle_message(message: Vec<u8>, signer: &Signer, hub_service: &mut HubService) -> Result<()> {
+    if let Ok(parsed_message) = Message::decode(message.as_slice()) {
+        // Deny submitting messages for other people todo: does this make sense?
+        if parsed_message.signer != signer.pk || !signer.active {
+            bail!("Message isn't from signer");
+        }
+
+        if let Err(e) = hub_service.submit_message(parsed_message).await {
+            bail!("Error submitting to hub {e}")
+        };
+    } else {
+        bail!("Couldn't process message as Message");
+    }
+    Ok(())
+}
+
+async fn submit_messages(
+    State(state): ServiceArcState,
+    Extension(signer): Extension<Signer>,
+    Json(messages): Json<Vec<Vec<u8>>>
+) -> Result<(), StatusCode> {
+    let mut service = state.lock().await;
+    for message in messages {
+        handle_message(message, &signer, &mut service.hub_client).await.map_err(|_| StatusCode::BAD_REQUEST)?
+    }
+    Ok(())
+}
+
+async fn submit_message(
+    State(state): ServiceArcState,
+    Extension(signer): Extension<Signer>,
+    body_bytes: Bytes
+) -> Result<(), StatusCode> {
+    let mut service = state.lock().await;
+    handle_message(body_bytes.to_vec(), &signer, &mut service.hub_client).await.map_err(|_|StatusCode::BAD_REQUEST)
+}
+
+
 async fn current_user_profile(
+    State(state): ServiceArcState,
     Extension(profile): Extension<Profile>
 ) -> Result<Json<Profile>, StatusCode> {
+    let service = state.lock().await;
+
+    queue_index_fid(&service.work_sender, profile.fid);
+    queue_index_links(&service.work_sender, profile.fid);
+    queue_index_casts(&service.work_sender, profile.fid);
+
     Ok(Json::from(profile))
+}
+
+async fn get_user_profile(
+    State(state): ServiceArcState,
+    Path(fid): Path<u64>
+) -> Result<Json<Profile>, StatusCode> {
+    let mut service = state.lock().await;
+
+    queue_index_fid(&service.work_sender, fid);
+    queue_index_links(&service.work_sender, fid);
+    queue_index_casts(&service.work_sender, fid);
+
+    match service.get_user_profile(fid, false).await {
+        Ok(profile) => {
+            Ok(Json(profile))
+        }
+        Err(_) => {
+            Err(StatusCode::NOT_FOUND)
+        }
+    }
+}
+
+async fn get_user_following(
+    State(state): ServiceArcState,
+    Path(fid): Path<u64>,
+) -> Result<Json<Vec<Profile>>, StatusCode> {
+    let mut service = state.lock().await;
+
+    queue_index_fid(&service.work_sender, fid);
+    queue_index_links(&service.work_sender, fid);
+    queue_index_casts(&service.work_sender, fid);
+
+    match service.get_profile_links(fid, false, FollowDirection::Following).await {
+        Ok(links) => {
+            Ok(Json(links))
+        },
+        Err(e) => {
+            error!("Couldn't get profile links {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn get_user_followed_by(
+    State(state): ServiceArcState,
+    Path(fid): Path<u64>,
+) -> Result<Json<Vec<Profile>>, StatusCode> {
+    let mut service = state.lock().await;
+
+    queue_index_fid(&service.work_sender, fid);
+    queue_index_links(&service.work_sender, fid);
+    queue_index_casts(&service.work_sender, fid);
+
+    match service.get_profile_links(fid, false, FollowDirection::FollowedBy).await {
+        Ok(links) => {
+            Ok(Json(links))
+        },
+        Err(e) => {
+            error!("Couldn't get profile links {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }

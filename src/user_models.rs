@@ -1,6 +1,7 @@
+use std::time::{Instant, SystemTime};
 use diesel::prelude::*;
 
-#[derive(Queryable, Selectable, Insertable, AsChangeset)]
+#[derive(Queryable, Selectable, Insertable, AsChangeset, Debug, Clone)]
 #[diesel(table_name=crate::schema::users)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct User {
@@ -32,4 +33,14 @@ pub struct Signer {
     pub pk: Vec<u8>,
     pub fid: i64,
     pub active: bool
+}
+
+#[derive(Queryable, Selectable, Insertable, Associations, Debug, Eq, PartialEq, Hash, Clone)]
+#[diesel(table_name=crate::schema::links)]
+#[diesel(belongs_to(User, foreign_key=target))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct Link {
+    pub fid: i64,
+    pub target: i64,
+    pub timestamp: SystemTime,
 }

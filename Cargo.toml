@@ -29,8 +29,10 @@ thiserror = "1.0.61"
 tokio-stream = "0.1.15"
 crossbeam = "0.8"
 dashmap = { version = "6", features = ["inline"] }
+clap = { version = "4.5.8", features = ["derive"] }
+chrono = "0.4"
 
 [dependencies.fatline-rs]
 git = "https://github.com/0x330a-public/fatline-rs.git"
-rev = "802017108dffae1dec49a64811d67dcab873744d"
+rev = "8e4aebbf0786eebe2285961af62ca9206c8fa427"
 features = ["service_types", "subscription"]

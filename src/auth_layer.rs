@@ -9,7 +9,7 @@ use axum::middleware::{Next};
 use fatline_rs::{HASH_LENGTH, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH};
 use fatline_rs::users::{Profile};
 use tokio::sync::Mutex;
-use tracing::error;
+use tracing::{debug, error, Level, span};
 
 use crate::{FID_HEADER, PUB_HEX_HEADER, SIGNATURE_DATA_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER};
 use crate::service::ServiceState;
@@ -27,6 +27,9 @@ pub async fn fid_sig_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<impl IntoResponse, StatusCode> {
+    let span = span!(Level::DEBUG,"auth");
+    let _guard = span.enter();
+    debug!("validating request for {}", &request.uri());
     let headers = request.headers();
     // do something with `request`...
     let extra_data_header = headers.get(SIGNATURE_DATA_HEADER); // try extract message from header
@@ -69,8 +72,10 @@ pub async fn fid_sig_auth_middleware(
     };
 
     match validation_result {
-        Ok(user) => {
-            request.extensions_mut().insert(user);
+        Ok((user, signer)) => {
+            let extensions = request.extensions_mut();
+            extensions.insert(user);
+            extensions.insert(signer);
             let res = next.run(request).await;
             Ok(res)
         },
@@ -84,14 +89,14 @@ async fn validate_fid_and_key(
     msg: [u8; HASH_LENGTH],
     sig: [u8; SIGNATURE_LENGTH],
     pub_key: [u8; PUBLIC_KEY_LENGTH],
-) -> Result<Profile, StatusCode> {
+) -> Result<(Profile,Signer), StatusCode> {
 
     // Check signer is valid for requested fid
     let signer = user_service.get_signer(pub_key.to_vec())
         .await
-        .map_err(|e| { 
+        .map_err(|e| {
             error!("Couldn't find signer for this request");
-            StatusCode::NOT_FOUND 
+            StatusCode::NOT_FOUND
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
@@ -106,7 +111,7 @@ async fn validate_fid_and_key(
         &pub_key
     ).map_err(|err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let profile = user_service.get_user_profile(signer.fid as u64)
+    let profile = user_service.get_user_profile(signer.fid as u64, false)
         .await
         .map_err(|e| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -114,6 +119,6 @@ async fn validate_fid_and_key(
         // log maybe or something
         Err(StatusCode::UNAUTHORIZED)
     } else { // verified signature
-        Ok(profile)
+        Ok((profile, signer))
     }
 }

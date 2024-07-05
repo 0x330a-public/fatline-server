@@ -4,7 +4,7 @@ diesel::table! {
     links (fid, target) {
         fid -> Int8,
         target -> Int8,
-        timestamp -> Nullable<Timestamp>,
+        timestamp -> Timestamp,
     }
 }
 

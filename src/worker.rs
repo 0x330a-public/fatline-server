@@ -8,21 +8,23 @@ use crossbeam::channel::{Receiver, after};
 use crossbeam::{scope, select};
 use dashmap::DashMap;
 use fatline_rs::posts::CastId;
+use futures_util::FutureExt;
+use tokio::join;
 use tokio::sync::Mutex;
-use tracing::{debug, error, Level, span, warn};
+use tracing::{debug, error, Level, span, trace, warn};
 use tokio::task::JoinHandle;
 use tokio::time::{Interval, interval};
 use crate::service::ServiceState;
 use crate::ServiceArcState;
 use crate::signer_repo::SignerRepository;
 use crate::user_models::Signer;
-use crate::user_repo::UserRepository;
+use crate::user_repo::{FollowDirection, UserRepository};
 
 #[derive(Debug,Hash,Eq,PartialEq,Clone)]
 pub enum Task {
-    IndexFid(u64),
+    IndexFid(u64, bool),
     IndexLinks(u64),
-    IndexReactions(CastId),
+    IndexFidCasts(u64, bool),
     IndexCast(CastId),
     UpdateSigner(Signer)
 }
@@ -45,12 +47,32 @@ fn should_schedule(last: u64, gap: usize) -> (u64, bool) {
 
 async fn index_fid(fid: u64, service_state: Arc<Mutex<ServiceState>>) {
     let mut state = service_state.lock().await;
-    match state.get_user_profile(fid).await {
+    match state.fetch_and_store_profile(fid).await {
         Ok(p) => {
-            debug!("Successfully indexed fid profile for {}", p.username.unwrap_or("user".to_string()));
+            debug!("Successfully indexed profile for fid {}", fid);
         }
         Err(e) => {
             error!("Error indexing profile {e}");
+        }
+    };
+}
+
+async fn index_links(fid: u64, service_state: Arc<Mutex<ServiceState>>) {
+    let mut state = service_state.lock().await;
+    match state.fetch_and_store_links(fid,FollowDirection::Following).await {
+        Ok(_) => {
+            debug!("Successfully indexed following for {fid}");
+        }
+        Err(_) => {
+            error!("Error indexing following for {fid}");
+        }
+    };
+    match state.fetch_and_store_links(fid, FollowDirection::FollowedBy).await {
+        Ok(_) => {
+            debug!("Successfully indexed followers for {fid}");
+        }
+        Err(_) => {
+            error!("Error indexing followers for {fid}");
         }
     };
 }
@@ -75,23 +97,40 @@ async fn schedule_task(task: Task, service_state: Arc<Mutex<ServiceState>>, inde
     let last_call = last.unwrap_or(0);
     match task.clone() {
         Task::UpdateSigner(signer_event) => {
-            debug!("kicking off signer event for {:?}", signer_event.fid);
-            handle_signer_event(signer_event.clone(), service_state.clone()).await;
+            trace!("kicking off signer event for {:?}", signer_event.fid);
+            tokio::spawn(handle_signer_event(signer_event.clone(), service_state.clone()));
         },
-        Task::IndexFid(fid) => {
+        Task::IndexFid(fid, force) => {
             // do check
-            let (now, should_schedule) = should_schedule(last_call, ONE_MINUTE * 60);
-            if should_schedule {
+            let (now, should_schedule) = should_schedule(last_call, ONE_MINUTE * 5);
+            if should_schedule || force {
                 // kick off job
-                debug!("kicking off index for fid {fid}");
-                tokio::spawn(index_fid(fid.to_owned(), service_state.clone()));
+                trace!("kicking off index for profile on {fid}");
                 index_map.insert(task, now);
+                tokio::spawn(async move {
+                    index_fid(fid.to_owned(), service_state.clone()).await;
+                });
             } else {
-                debug!("skipping task {:?}", &task);
+                trace!("skipping task {:?}", &task);
+            }
+        },
+        Task::IndexLinks(fid) => {
+            let (now, should_schedule) = should_schedule(last_call, ONE_MINUTE * 30);
+            if should_schedule {
+                trace!("kicking off index for links on {fid}");
+                index_map.insert(task, now);
+                tokio::spawn(async move {
+                    index_links(fid.to_owned(), service_state.clone()).await;
+                });
+            } else {
+                trace!("skipping task {:?}", &task);
             }
         }
-        _ => {
-            // handle different types
+        Task::IndexFidCasts(fid, force) => {
+
+        }
+        Task::IndexCast(cast_id) => {
+
         }
     }
 }
