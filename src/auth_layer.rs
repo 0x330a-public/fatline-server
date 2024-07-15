@@ -23,7 +23,7 @@ fn bad_request(_: impl Any) -> StatusCode {
 }
 
 pub async fn fid_sig_auth_middleware(
-    State(state): State<Arc<Mutex<ServiceState>>>,
+    State(state): State<Arc<ServiceState>>,
     mut request: Request,
     next: Next,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -51,7 +51,7 @@ pub async fn fid_sig_auth_middleware(
     hex::decode_to_slice(pub_key_header.as_bytes(), &mut pub_key).map_err(bad_request)?;
 
     let timestamp_str = timestamp_header.to_str().map_err(bad_request)?;
-    // TODO: check timestamp is withing X minutes / seconds here
+    // TODO: check timestamp is within X minutes / seconds here
     let timestamp: u64 = u64::from_str(timestamp_str).map_err(bad_request)?;
 
     let mut msg = Vec::new();
@@ -61,10 +61,8 @@ pub async fn fid_sig_auth_middleware(
     let msg_hash = fatline_rs::utils::truncated_hash(msg.as_slice());
 
     let validation_result = {
-        let mut service_lock = state.lock().await;
-
         validate_fid_and_key(
-            &mut service_lock,
+            &state,
             msg_hash,
             sig,
             pub_key
@@ -85,7 +83,7 @@ pub async fn fid_sig_auth_middleware(
 
 // Validate that pub_key signed the hash and that pub_key belongs to, and is active on fid
 async fn validate_fid_and_key(
-    user_service: &mut ServiceState,
+    user_service: &ServiceState,
     msg: [u8; HASH_LENGTH],
     sig: [u8; SIGNATURE_LENGTH],
     pub_key: [u8; PUBLIC_KEY_LENGTH],

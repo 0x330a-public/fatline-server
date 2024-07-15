@@ -9,6 +9,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    notifications (notification_id) {
+        notification_id -> Uuid,
+        fid -> Int8,
+        notification_type -> Int4,
+        notification_data -> Bytea,
+        created -> Timestamp,
+        viewed -> Bool,
+    }
+}
+
+diesel::table! {
     signers (pk) {
         pk -> Bytea,
         fid -> Int8,
@@ -27,10 +38,12 @@ diesel::table! {
     }
 }
 
+diesel::joinable!(notifications -> users (fid));
 diesel::joinable!(signers -> users (fid));
 
 diesel::allow_tables_to_appear_in_same_query!(
     links,
+    notifications,
     signers,
     users,
 );

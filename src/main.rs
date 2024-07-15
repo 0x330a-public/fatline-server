@@ -19,7 +19,7 @@ use fatline_rs::users::Profile;
 use futures_util::TryFutureExt;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, error};
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -51,7 +51,7 @@ const SIGNATURE_DATA_HEADER: &'static str = "extra_sig_data_hex";
 const SIGNATURE_HEADER: &'static str = "sig";
 const FID_HEADER: &'static str = "fid";
 
-type ServiceArcState = State<Arc<Mutex<ServiceState>>>;
+type ServiceArcState = State<Arc<ServiceState>>;
 
 #[derive(Parser, Debug)]
 #[command(name="fatline")]
@@ -78,7 +78,9 @@ async fn index_signers(fid: u64) -> Result<()> {
     let (s,r) = bounded(1);
     let mut state = ServiceState::new(s).await;
 
-    let events = state.hub_client.get_on_chain_signers_by_fid(FidRequest {
+    let mut hub_client = ServiceState::hub_client().await;
+
+    let events = hub_client.get_on_chain_signers_by_fid(FidRequest {
         fid,
         page_size: None,
         reverse: None,
@@ -122,13 +124,13 @@ async fn main() -> Result<()> {
     let index_map = Arc::new(DashMap::new());
     let (sender, receiver) = channel::unbounded();
 
-    let service = ServiceState::new(sender.clone());
-    let worker_service = ServiceState::new(sender.clone());
+    let service = ServiceState::new(sender.clone()).await;
+    let worker_service = ServiceState::new(sender.clone()).await;
 
-    let service_arc = Arc::new(Mutex::new(service.await));
+    let service_arc = Arc::new(service);
     debug!("Initialized server resources [1/2]");
 
-    let worker_service = Arc::new(Mutex::new(worker_service.await));
+    let worker_service = Arc::new(worker_service);
     debug!("Initialized worker resources [2/2]");
 
     let worker = Worker::new(worker_service, receiver.clone(), index_map.clone());
@@ -185,17 +187,26 @@ async fn handle_message(message: Vec<u8>, signer: &Signer, hub_service: &mut Hub
     } else {
         bail!("Couldn't process message as Message");
     }
+    debug!("successfully forwarded message to hub");
     Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Messages {
+    pub updates: Vec<Vec<u8>>
 }
 
 async fn submit_messages(
     State(state): ServiceArcState,
     Extension(signer): Extension<Signer>,
-    Json(messages): Json<Vec<Vec<u8>>>
+    Json(messages): Json<Messages>
 ) -> Result<(), StatusCode> {
-    let mut service = state.lock().await;
-    for message in messages {
-        handle_message(message, &signer, &mut service.hub_client).await.map_err(|_| StatusCode::BAD_REQUEST)?
+    let mut hub = state.hub_client.lock().await;
+    for message in messages.updates {
+        handle_message(message, &signer, &mut hub).await.map_err(|e| {
+            error!("error posting update {}",e.to_string());
+            StatusCode::BAD_REQUEST
+        })?
     }
     Ok(())
 }
@@ -205,8 +216,8 @@ async fn submit_message(
     Extension(signer): Extension<Signer>,
     body_bytes: Bytes
 ) -> Result<(), StatusCode> {
-    let mut service = state.lock().await;
-    handle_message(body_bytes.to_vec(), &signer, &mut service.hub_client).await.map_err(|_|StatusCode::BAD_REQUEST)
+    let mut hub_client = state.hub_client.lock().await;
+    handle_message(body_bytes.to_vec(), &signer, &mut hub_client).await.map_err(|_|StatusCode::BAD_REQUEST)
 }
 
 
@@ -214,11 +225,10 @@ async fn current_user_profile(
     State(state): ServiceArcState,
     Extension(profile): Extension<Profile>
 ) -> Result<Json<Profile>, StatusCode> {
-    let service = state.lock().await;
 
-    queue_index_fid(&service.work_sender, profile.fid);
-    queue_index_links(&service.work_sender, profile.fid);
-    queue_index_casts(&service.work_sender, profile.fid);
+    queue_index_fid(&state.work_sender, profile.fid);
+    queue_index_links(&state.work_sender, profile.fid);
+    queue_index_casts(&state.work_sender, profile.fid);
 
     Ok(Json::from(profile))
 }
@@ -227,13 +237,12 @@ async fn get_user_profile(
     State(state): ServiceArcState,
     Path(fid): Path<u64>
 ) -> Result<Json<Profile>, StatusCode> {
-    let mut service = state.lock().await;
 
-    queue_index_fid(&service.work_sender, fid);
-    queue_index_links(&service.work_sender, fid);
-    queue_index_casts(&service.work_sender, fid);
+    queue_index_fid(&state.work_sender, fid);
+    queue_index_links(&state.work_sender, fid);
+    queue_index_casts(&state.work_sender, fid);
 
-    match service.get_user_profile(fid, false).await {
+    match state.get_user_profile(fid, false).await {
         Ok(profile) => {
             Ok(Json(profile))
         }
@@ -244,16 +253,15 @@ async fn get_user_profile(
 }
 
 async fn get_user_following(
-    State(state): ServiceArcState,
+    State(mut state): ServiceArcState,
     Path(fid): Path<u64>,
 ) -> Result<Json<Vec<Profile>>, StatusCode> {
-    let mut service = state.lock().await;
 
-    queue_index_fid(&service.work_sender, fid);
-    queue_index_links(&service.work_sender, fid);
-    queue_index_casts(&service.work_sender, fid);
+    queue_index_fid(&state.work_sender, fid);
+    queue_index_links(&state.work_sender, fid);
+    queue_index_casts(&state.work_sender, fid);
 
-    match service.get_profile_links(fid, false, FollowDirection::Following).await {
+    match state.get_profile_links(fid, false, FollowDirection::Following).await {
         Ok(links) => {
             Ok(Json(links))
         },
@@ -265,16 +273,15 @@ async fn get_user_following(
 }
 
 async fn get_user_followed_by(
-    State(state): ServiceArcState,
+    State(mut state): ServiceArcState,
     Path(fid): Path<u64>,
 ) -> Result<Json<Vec<Profile>>, StatusCode> {
-    let mut service = state.lock().await;
 
-    queue_index_fid(&service.work_sender, fid);
-    queue_index_links(&service.work_sender, fid);
-    queue_index_casts(&service.work_sender, fid);
+    queue_index_fid(&state.work_sender, fid);
+    queue_index_links(&state.work_sender, fid);
+    queue_index_casts(&state.work_sender, fid);
 
-    match service.get_profile_links(fid, false, FollowDirection::FollowedBy).await {
+    match state.get_profile_links(fid, false, FollowDirection::FollowedBy).await {
         Ok(links) => {
             Ok(Json(links))
         },

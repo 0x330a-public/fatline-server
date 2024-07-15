@@ -1,5 +1,7 @@
-use std::time::{Instant, SystemTime};
+use std::time::{SystemTime};
 use diesel::prelude::*;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Queryable, Selectable, Insertable, AsChangeset, Debug, Clone)]
 #[diesel(table_name=crate::schema::users)]
@@ -43,4 +45,17 @@ pub struct Link {
     pub fid: i64,
     pub target: i64,
     pub timestamp: SystemTime,
+}
+
+#[derive(Serialize, Deserialize, Queryable, Selectable, Insertable, Associations, Debug, Clone)]
+#[diesel(table_name=crate::schema::notifications)]
+#[diesel(belongs_to(User, foreign_key=fid))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct Notification {
+    pub notification_id: Uuid,
+    pub fid: i64,
+    pub notification_type: i32,
+    pub notification_data: Vec<u8>,
+    pub created: SystemTime,
+    pub viewed: bool
 }

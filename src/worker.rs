@@ -45,9 +45,8 @@ fn should_schedule(last: u64, gap: usize) -> (u64, bool) {
     (now, now > Duration::from_secs(last).add(Duration::from_secs(gap as u64)).as_secs())
 }
 
-async fn index_fid(fid: u64, service_state: Arc<Mutex<ServiceState>>) {
-    let mut state = service_state.lock().await;
-    match state.fetch_and_store_profile(fid).await {
+async fn index_fid(fid: u64, service_state: Arc<ServiceState>) {
+    match service_state.fetch_and_store_profile(fid).await {
         Ok(p) => {
             debug!("Successfully indexed profile for fid {}", fid);
         }
@@ -57,8 +56,7 @@ async fn index_fid(fid: u64, service_state: Arc<Mutex<ServiceState>>) {
     };
 }
 
-async fn index_links(fid: u64, service_state: Arc<Mutex<ServiceState>>) {
-    let mut state = service_state.lock().await;
+async fn index_links(fid: u64, state: Arc<ServiceState>) {
     match state.fetch_and_store_links(fid,FollowDirection::Following).await {
         Ok(_) => {
             debug!("Successfully indexed following for {fid}");
@@ -77,9 +75,8 @@ async fn index_links(fid: u64, service_state: Arc<Mutex<ServiceState>>) {
     };
 }
 
-async fn handle_signer_event(signer: Signer, service_state: Arc<Mutex<ServiceState>>) {
-    let mut state = service_state.lock().await;
-    let insert_result = state.insert_signer(signer).await;
+async fn handle_signer_event(signer: Signer, service_state: Arc<ServiceState>) {
+    let insert_result = service_state.insert_signer(signer).await;
     match insert_result {
         Ok(r) => {
             // successfully stored signer
@@ -93,7 +90,7 @@ async fn handle_signer_event(signer: Signer, service_state: Arc<Mutex<ServiceSta
 
 const ONE_MINUTE: usize = 60;
 
-async fn schedule_task(task: Task, service_state: Arc<Mutex<ServiceState>>, index_map: Arc<DashMap<Task, u64>>, last: Option<u64>) {
+async fn schedule_task(task: Task, service_state: Arc<ServiceState>, index_map: Arc<DashMap<Task, u64>>, last: Option<u64>) {
     let last_call = last.unwrap_or(0);
     match task.clone() {
         Task::UpdateSigner(signer_event) => {
@@ -135,7 +132,7 @@ async fn schedule_task(task: Task, service_state: Arc<Mutex<ServiceState>>, inde
     }
 }
 
-async fn consume_receiver(service_state: Arc<Mutex<ServiceState>>, receiver: Receiver<Task>, index_map: Arc<DashMap<Task, u64>>) {
+async fn consume_receiver(service_state: Arc<ServiceState>, receiver: Receiver<Task>, index_map: Arc<DashMap<Task, u64>>) {
     debug!("Starting consumer");
     loop {
         let span = span!(Level::DEBUG, "worker loop");
@@ -158,7 +155,7 @@ async fn consume_receiver(service_state: Arc<Mutex<ServiceState>>, receiver: Rec
 
 impl Worker {
 
-    pub fn new(service_state: Arc<Mutex<ServiceState>>, receiver: Receiver<Task>, index_map: Arc<DashMap<Task,u64>>) -> Self {
+    pub fn new(service_state: Arc<ServiceState>, receiver: Receiver<Task>, index_map: Arc<DashMap<Task,u64>>) -> Self {
         let handle = tokio::spawn(consume_receiver(service_state, receiver, index_map));
         Worker {
             handle

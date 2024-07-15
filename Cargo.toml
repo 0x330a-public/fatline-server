@@ -23,7 +23,7 @@ futures-util = "0.3.30"
 hex = "0.4.3"
 serde = { version = "1.0.197", features = ["derive"] }
 ciborium = "0.2.2"
-diesel = { version = "2.2.1", features = ["r2d2", "postgres"] }
+diesel = { version = "2.2.1", features = ["r2d2", "postgres", "uuid"] }
 r2d2_postgres = "0.18.1"
 thiserror = "1.0.61"
 tokio-stream = "0.1.15"
@@ -31,6 +31,7 @@ crossbeam = "0.8"
 dashmap = { version = "6", features = ["inline"] }
 clap = { version = "4.5.8", features = ["derive"] }
 chrono = "0.4"
+uuid = { version = "1.10.0", features = ["serde"] }
 
 [dependencies.fatline-rs]
 git = "https://github.com/0x330a-public/fatline-rs.git"

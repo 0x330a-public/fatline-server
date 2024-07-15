@@ -13,13 +13,13 @@ use crate::user_models::{Signer, User};
 
 #[async_trait]
 pub trait SignerRepository {
-    async fn get_signer(&mut self, pk_q: Vec<u8>) -> eyre::Result<Option<Signer>>;
-    async fn insert_signer(&mut self, signer: Signer) -> eyre::Result<Signer>;
+    async fn get_signer(&self, pk_q: Vec<u8>) -> eyre::Result<Option<Signer>>;
+    async fn insert_signer(&self, signer: Signer) -> eyre::Result<Signer>;
 }
 
 #[async_trait]
 impl SignerRepository for ServiceState {
-    async fn get_signer(&mut self, pk_q: Vec<u8>) -> eyre::Result<Option<Signer>> {
+    async fn get_signer(&self, pk_q: Vec<u8>) -> eyre::Result<Option<Signer>> {
         let mut db = self.db_pool.get()?;
         let existing = signers.select(Signer::as_select()).filter(pk.eq(pk_q)).get_result(&mut db).optional();
         match existing {
@@ -29,7 +29,7 @@ impl SignerRepository for ServiceState {
         }
     }
 
-    async fn insert_signer(&mut self, signer: Signer) -> eyre::Result<Signer> {
+    async fn insert_signer(&self, signer: Signer) -> eyre::Result<Signer> {
         let mut db = self.db_pool.get()?;
         let insert_result = db.transaction(|db| {
             // ensure signer's fid is pre-loaded into user table if not already, do nothing on conflict

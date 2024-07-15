@@ -4,11 +4,12 @@ use diesel::r2d2::ConnectionManager;
 use dotenvy_macro::dotenv;
 use fatline_rs::HubService;
 use r2d2_postgres::r2d2::Pool;
+use tokio::sync::Mutex;
 
 use crate::worker::Task;
 
 pub struct ServiceState {
-    pub(crate) hub_client: HubService,
+    pub(crate) hub_client: Mutex<HubService>,
     pub(crate) db_pool: DbPool,
     pub(crate) work_sender: Sender<Task>,
 }
@@ -36,7 +37,7 @@ impl ServiceState {
         let pool = Self::db_pool(4).await;
 
         Self {
-            hub_client: client,
+            hub_client: Mutex::new(client),
             db_pool: pool,
             work_sender: sender
         }
