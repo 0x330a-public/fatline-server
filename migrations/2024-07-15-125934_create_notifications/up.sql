@@ -8,4 +8,3 @@ create table if not exists notifications
     created timestamp not null default now(),
     viewed bool not null default false
 );
-

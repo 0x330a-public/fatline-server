@@ -1,9 +1,11 @@
+use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::async_trait;
 use chrono::{DateTime, NaiveDateTime};
-use diesel::{BoolExpressionMethods, Connection, ExpressionMethods, Insertable, JoinOnDsl, QueryDsl, QuerySource, RunQueryDsl, Selectable, SelectableHelper, Table};
+use diesel::{BoolExpressionMethods, Connection, EqAll, ExpressionMethods, Insertable, JoinOnDsl, QueryDsl, QuerySource, RunQueryDsl, Selectable, SelectableHelper, Table};
 use diesel::associations::HasTable;
+use diesel::connection::SimpleConnection;
 use diesel::result::Error;
 use diesel::result::Error::DatabaseError;
 use eyre::{bail, OptionExt, Result};
@@ -90,8 +92,10 @@ impl UserRepository for ServiceState {
 
     async fn fetch_and_store_profile(&self, fid_q: u64) -> Result<Profile> {
         let mut db = self.db_pool.get()?;
-        let mut hub_client = self.hub_client.lock().await;
-        let fetched = hub_client.get_user_profile(fid_q).await?;
+        let fetched = {
+            let mut hub_client = self.hub_client.lock().await.clone();
+            hub_client.get_user_profile(fid_q).await?
+        };
         let to_store: User = fetched.into();
         let insert = diesel::insert_into(users)
             .values(&to_store)
@@ -117,7 +121,7 @@ impl UserRepository for ServiceState {
                                 links.select(l_fid).filter(target.eq(fid_q as i64))
                             )
                         )
-                        .load(&mut db),
+                        .get_results(&mut db),
                 FollowDirection::Following =>
                     users.select(User::as_select())
                         .filter(
@@ -125,7 +129,7 @@ impl UserRepository for ServiceState {
                                 links.select(target).filter(l_fid.eq(fid_q as i64))
                             )
                         )
-                        .load(&mut db)
+                        .get_results(&mut db)
             }
         };
 
@@ -138,7 +142,14 @@ impl UserRepository for ServiceState {
 
     async fn fetch_and_store_links(&self, fid_q: u64, direction: FollowDirection) -> Result<Vec<Profile>> {
         let mut db = self.db_pool.get()?;
-        let mut hub_client = self.hub_client.lock().await;
+        let mut hub_client = {
+            let locked = self.hub_client.lock().await;
+            locked.clone()
+        };
+
+        let mut to_add = BTreeSet::new();
+        let mut adds = vec![];
+        let mut deletes = vec![];
 
         let fetched = match direction {
             FollowDirection::Following => hub_client.get_links_by_fid(LinksByFidRequest {
@@ -158,49 +169,48 @@ impl UserRepository for ServiceState {
         }.messages.iter().cloned().filter_map(link_from_message)
             .flatten()
             .collect::<Vec<_>>();
+
+        for action in fetched {
+            match action {
+                LinkAction::AddFollow(follow) => {
+                    to_add.insert(follow.source_fid as i64);
+                    to_add.insert(follow.target_fid as i64);
+                    adds.push(follow);
+                }
+                LinkAction::RemoveFollow(remove) => {
+                    deletes.push((remove.source_fid, remove.target_fid));
+                }
+            }
+        }
         
         db.transaction::<_,eyre::Error,_>(|db| {
 
             // create our user to ensure key constraints
-            User::empty(fid_q as i64).insert_into(users).on_conflict_do_nothing().execute(db)?;
+            diesel::insert_into(users::table())
+                .values(to_add.iter().copied().map(|f| User::empty(f)).collect::<Vec<_>>())
+                .on_conflict_do_nothing()
+                .execute(db)?;
 
-            for action in fetched {
-                let info = match &action {
-                    LinkAction::AddFollow(i) => i,
-                    LinkAction::RemoveFollow(i) => i
-                };
-                let to_create = match direction {
-                    FollowDirection::Following => info.target_fid,
-                    FollowDirection::FollowedBy => info.source_fid
-                };
-                // create empty user to ensure key constraints
-                User::empty(to_create as i64)
-                    .insert_into(users)
-                    .on_conflict_do_nothing()
-                    .execute(db)?;
-
-                let timestamp = fatline_rs::utils::fc_timestamp_to_unix(info.timestamp)?;
-                let date = DateTime::from_timestamp(timestamp as i64, 0).unwrap_or_default();
-
-                match action {
-                    LinkAction::AddFollow(_) => {
-                        Link {
-                            fid: info.source_fid as i64,
-                            target: info.target_fid as i64,
-                            timestamp: SystemTime::from(date),
-                        }.insert_into(links).on_conflict_do_nothing().execute(db)?;
+            diesel::insert_into(links::table())
+                .values(adds.iter().map(|info|{
+                    let timestamp = fatline_rs::utils::fc_timestamp_to_unix(info.timestamp).unwrap_or_default();
+                    let date = DateTime::from_timestamp(timestamp as i64, 0).unwrap_or_default();
+                    Link {
+                        fid: info.source_fid as i64,
+                        target: info.target_fid as i64,
+                        timestamp: SystemTime::from(date),
                     }
-                    LinkAction::RemoveFollow(_) => {
-                        diesel::delete(
-                            links.filter(
-                                l_fid.eq(info.source_fid as i64)
-                                    .and(target.eq(info.target_fid as i64))
-                            )
-                        ).execute(db)?;
-                    }
-                }
+                }).collect::<Vec<_>>())
+                .on_conflict_do_nothing()
+                .execute(db)?;
+
+            for (s,t) in deletes {
+                diesel::delete(links.filter(
+                    l_fid.eq(s as i64)
+                        .and(target.eq(t as i64))
+                )).execute(db)?;
             }
-            
+
             Ok(())
         })?;
 

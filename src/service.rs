@@ -34,7 +34,7 @@ impl ServiceState {
 
     pub async fn new(sender: Sender<Task>) -> Self {
         let client = Self::hub_client().await;
-        let pool = Self::db_pool(4).await;
+        let pool = Self::db_pool(16).await;
 
         Self {
             hub_client: Mutex::new(client),

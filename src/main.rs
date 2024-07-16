@@ -40,6 +40,7 @@ mod worker;
 mod signer_repo;
 mod error;
 mod subscriber;
+mod notifier;
 
 // constants for headers
 // required headers: pub_hex, timestamp, sig, fid
@@ -261,7 +262,7 @@ async fn get_user_following(
     queue_index_links(&state.work_sender, fid);
     queue_index_casts(&state.work_sender, fid);
 
-    match state.get_profile_links(fid, false, FollowDirection::Following).await {
+    match state.get_profile_links(fid, true, FollowDirection::Following).await {
         Ok(links) => {
             Ok(Json(links))
         },
@@ -281,7 +282,7 @@ async fn get_user_followed_by(
     queue_index_links(&state.work_sender, fid);
     queue_index_casts(&state.work_sender, fid);
 
-    match state.get_profile_links(fid, false, FollowDirection::FollowedBy).await {
+    match state.get_profile_links(fid, true, FollowDirection::FollowedBy).await {
         Ok(links) => {
             Ok(Json(links))
         },

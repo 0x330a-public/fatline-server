@@ -11,7 +11,7 @@ use fatline_rs::posts::CastId;
 use futures_util::FutureExt;
 use tokio::join;
 use tokio::sync::Mutex;
-use tracing::{debug, error, Level, span, trace, warn};
+use tracing::{debug, error, Instrument, Level, span, trace, warn};
 use tokio::task::JoinHandle;
 use tokio::time::{Interval, interval};
 use crate::service::ServiceState;
@@ -48,6 +48,7 @@ fn should_schedule(last: u64, gap: usize) -> (u64, bool) {
 async fn index_fid(fid: u64, service_state: Arc<ServiceState>) {
     match service_state.fetch_and_store_profile(fid).await {
         Ok(p) => {
+            let _= service_state.work_sender.send(Task::IndexLinks(fid));
             debug!("Successfully indexed profile for fid {}", fid);
         }
         Err(e) => {
@@ -58,7 +59,10 @@ async fn index_fid(fid: u64, service_state: Arc<ServiceState>) {
 
 async fn index_links(fid: u64, state: Arc<ServiceState>) {
     match state.fetch_and_store_links(fid,FollowDirection::Following).await {
-        Ok(_) => {
+        Ok(p) => {
+            for profile in p {
+                let _= state.work_sender.send(Task::IndexFid(profile.fid, false));
+            }
             debug!("Successfully indexed following for {fid}");
         }
         Err(_) => {
@@ -66,7 +70,10 @@ async fn index_links(fid: u64, state: Arc<ServiceState>) {
         }
     };
     match state.fetch_and_store_links(fid, FollowDirection::FollowedBy).await {
-        Ok(_) => {
+        Ok(p) => {
+            for profile in p {
+                let _= state.work_sender.send(Task::IndexFid(profile.fid, false));
+            }
             debug!("Successfully indexed followers for {fid}");
         }
         Err(_) => {
@@ -92,10 +99,12 @@ const ONE_MINUTE: usize = 60;
 
 async fn schedule_task(task: Task, service_state: Arc<ServiceState>, index_map: Arc<DashMap<Task, u64>>, last: Option<u64>) {
     let last_call = last.unwrap_or(0);
+    let db_conns = service_state.db_pool.state().connections;
+    debug!("scheduling task {task:?}, last_call was {last_call}, db conns: {}", db_conns);
     match task.clone() {
         Task::UpdateSigner(signer_event) => {
             trace!("kicking off signer event for {:?}", signer_event.fid);
-            tokio::spawn(handle_signer_event(signer_event.clone(), service_state.clone()));
+            handle_signer_event(signer_event.clone(), service_state.clone()).await;
         },
         Task::IndexFid(fid, force) => {
             // do check
@@ -104,9 +113,7 @@ async fn schedule_task(task: Task, service_state: Arc<ServiceState>, index_map: 
                 // kick off job
                 trace!("kicking off index for profile on {fid}");
                 index_map.insert(task, now);
-                tokio::spawn(async move {
-                    index_fid(fid.to_owned(), service_state.clone()).await;
-                });
+                index_fid(fid.to_owned(), service_state.clone()).await;
             } else {
                 trace!("skipping task {:?}", &task);
             }
@@ -116,9 +123,7 @@ async fn schedule_task(task: Task, service_state: Arc<ServiceState>, index_map: 
             if should_schedule {
                 trace!("kicking off index for links on {fid}");
                 index_map.insert(task, now);
-                tokio::spawn(async move {
-                    index_links(fid.to_owned(), service_state.clone()).await;
-                });
+                index_links(fid.to_owned(), service_state.clone()).await;
             } else {
                 trace!("skipping task {:?}", &task);
             }
@@ -134,15 +139,16 @@ async fn schedule_task(task: Task, service_state: Arc<ServiceState>, index_map: 
 
 async fn consume_receiver(service_state: Arc<ServiceState>, receiver: Receiver<Task>, index_map: Arc<DashMap<Task, u64>>) {
     debug!("Starting consumer");
+    let span = span!(Level::DEBUG, "worker loop");
     loop {
-        let span = span!(Level::DEBUG, "worker loop");
-        let _enter = span.enter();
         select! {
             recv(receiver)->next => {
                 match next {
                     Ok(task) => {
                         let option = index_map.get(&task).map(|task| task.value().clone());
-                        schedule_task(task, service_state.clone(), index_map.clone(), option).await;
+                        schedule_task(task, service_state.clone(), index_map.clone(), option)
+                        .instrument(span.clone())
+                        .await;
                     },
                     Err( e) => {
                         error!("Error receiving task from worker {:?}", e);
